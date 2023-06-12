@@ -24,7 +24,7 @@ typedef IfcGeom::BRepElement elem_t;
 #else
 #include <map>                    // @todo < commit in IfcopenShell
 #include <ifcparse/IfcLogger.h>   // @todo < commit in IfcopenShell
-#include <ifcgeom/IfcGeomElement.h>
+#include <ifcgeom_schema_agnostic/IfcGeomElement.h>
 
 #ifdef IFCOPENSHELL_07
 typedef IfcGeom::BRepElement elem_t;

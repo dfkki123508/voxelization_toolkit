@@ -26,11 +26,15 @@ if(IFC_SUPPORT)
 add_definitions(-DWITH_IFC)
 endif()
 
-message(STATUS "IFCOPENSHELL_ROOT: ${IFCOPENSHELL_ROOT}")
+# make absolute path
+get_filename_component(IFCOPENSHELL_ROOT ${IFCOPENSHELL_ROOT} REALPATH BASE_DIR "${CMAKE_CURRENT_LIST_DIR}")
+message(STATUS "Checking IFCOPENSHELL_ROOT: ${IFCOPENSHELL_ROOT}")
+if(NOT EXISTS ${IFCOPENSHELL_ROOT})
+    message(FATAL_ERROR "IFCOPENSHELL_ROOT Directory does not exist! ${IFCOPENSHELL_ROOT}")
+endif()
 
-if (USE_BUILD_SCRIPT_OUTPUT) 
-	if(UNIX)
-		set(IFCOPENSHELL_INSTALL ${IFCOPENSHELL_ROOT}/build/Linux/x86_64/install)
+if(UNIX)
+    set(IFCOPENSHELL_INSTALL ${IFCOPENSHELL_ROOT}/build/Linux/x86_64/install)
     
 		if(IFC_SUPPORT)
 			foreach(occt_dir occt-7.3.0 occt-7.3.0p3)
@@ -70,7 +74,7 @@ else()
         if ("${MSVC_VERSION}" STREQUAL "1900")
             set(MSVC_YEAR 2015)
 		elseif(MSVC_VERSION GREATER 1919)
-			set(MSVC_YEAR 2019)
+			set(MSVC_YEAR 2022)
         endif()
 		
 		file(READ "${IFCOPENSHELL_ROOT}/src/ifcparse/IfcParse.h" header)
@@ -81,13 +85,13 @@ else()
             set(OCC_LIBRARY_DIR  ${IFCOPENSHELL_ROOT}/_deps-vs${MSVC_YEAR}-${WIN_ARCH}-installed/oce/${WIN_ARCH}/lib)    
         else()
 			if (${ifcopenshell_major_version} STREQUAL "0.7")
-				set(OCC_LIBRARY_DIR  ${IFCOPENSHELL_ROOT}/_deps-vs${MSVC_YEAR}-${WIN_ARCH}-installed/opencascade-7.5.3/win${BITS}/lib)
+				set(OCC_LIBRARY_DIR  ${IFCOPENSHELL_ROOT}/_deps-vs${MSVC_YEAR}-${WIN_ARCH}-installed/opencascade-7.7.1/win${BITS}/lib)
 			else()
 				set(OCC_LIBRARY_DIR  ${IFCOPENSHELL_ROOT}/_deps-vs${MSVC_YEAR}-${WIN_ARCH}-installed/opencascade-7.3.0/win${BITS}/lib)
 			endif()
         endif()
         if (${ifcopenshell_major_version} STREQUAL "0.7")   
-			set(OCC_INCLUDE_DIR  ${IFCOPENSHELL_ROOT}/_deps-vs${MSVC_YEAR}-${WIN_ARCH}-installed/opencascade-7.5.3/inc)
+			set(OCC_INCLUDE_DIR  ${IFCOPENSHELL_ROOT}/_deps-vs${MSVC_YEAR}-${WIN_ARCH}-installed/opencascade-7.7.1/inc)
 		else()
 			set(OCC_INCLUDE_DIR  ${IFCOPENSHELL_ROOT}/_deps-vs${MSVC_YEAR}-${WIN_ARCH}-installed/oce/include/oce
                              ${IFCOPENSHELL_ROOT}/_deps-vs${MSVC_YEAR}-${WIN_ARCH}-installed/opencascade-7.3.0/inc)			 
@@ -129,34 +133,35 @@ set(BOOST_COMPONENTS regex program_options iostreams system)
 
 
 if (IFC_SUPPORT)
-# Find IfcOpenShell version, v0.6.0 does not have the IfcSchema namespace anymore
-file(READ "${IFCOPENSHELL_ROOT}/src/ifcparse/IfcParse.h" header)
-string(REGEX MATCH "#define IFCOPENSHELL_VERSION \"[0-9a-zA-Z\\.\\-]+\"" ifcopenshell_version "${header}")
-string(REGEX MATCH "[0-9]\\.[0-9]" ifcopenshell_major_version "${ifcopenshell_version}")
-message(STATUS "IfcOpenShell version ${ifcopenshell_major_version}")
+    # Find IfcOpenShell version, v0.6.0 does not have the IfcSchema namespace anymore
+    file(READ "${IFCOPENSHELL_ROOT}/src/ifcparse/IfcParse.h" header)
+    string(REGEX MATCH "#define IFCOPENSHELL_VERSION \"[0-9a-zA-Z\\.\\-]+\"" ifcopenshell_version "${header}")
+    string(REGEX MATCH "[0-9]\\.[0-9]" ifcopenshell_major_version "${ifcopenshell_version}")
+    message(STATUS "IfcOpenShell version ${ifcopenshell_major_version}")
 
-if (${ifcopenshell_major_version} STREQUAL "0.7")
-		add_definitions("-DIFCOPENSHELL_07")
-endif()
+    if (${ifcopenshell_major_version} STREQUAL "0.7")
+            add_definitions("-DIFCOPENSHELL_07")
+    endif()
 
 
-if (${ifcopenshell_major_version} STREQUAL "0.5")
-set(IFC_LIBRARY_NAMES IfcGeom IfcParse)
-add_definitions("-DIFCOPENSHELL_05")
-else()
-	# user to supply:
-	#  * IFCOPENSHELL_ROOT or IFC_INCLUDE_DIR
-	#  * OCC_INCLUDE_DIR
-	#  * OCC_LIBRARY_DIR
-	#  * BOOST_ROOT
-	#  * IFC_LIBRARY_DIR
-	#  * (BOOST_LIBRARYDIR)
-	#  * (USE_STATIC_MSVC_RUNTIME=Off)
-	#  * (Boost_USE_STATIC_LIBS=On)
+    if (${ifcopenshell_major_version} STREQUAL "0.5")
+        set(IFC_LIBRARY_NAMES IfcGeom IfcParse)
+        add_definitions("-DIFCOPENSHELL_05")
+    else()
+        # user to supply:
+        #  * IFCOPENSHELL_ROOT or IFC_INCLUDE_DIR
+        #  * OCC_INCLUDE_DIR
+        #  * OCC_LIBRARY_DIR
+        #  * BOOST_ROOT
+        #  * IFC_LIBRARY_DIR
+        #  * (BOOST_LIBRARYDIR)
+        #  * (USE_STATIC_MSVC_RUNTIME=Off)
+        #  * (Boost_USE_STATIC_LIBS=On)
 
-	if (NOT DEFINED IFC_INCLUDE_DIR)
-		set (IFC_INCLUDE_DIR "${IFCOPENSHELL_ROOT}/src")
-	endif()
+        if (NOT DEFINED IFC_INCLUDE_DIR)
+            set (IFC_INCLUDE_DIR "${IFCOPENSHELL_ROOT}/src")
+        endif()
+    endif()
 endif()
 
 foreach(libname ${OCC_LIBRARY_NAMES})
@@ -219,8 +224,8 @@ else()
 			"${HDF5_LIBRARY_DIR}/libaec.lib")
 	endif()
 	
-    set(BOOST_ROOT       ${IFCOPENSHELL_ROOT}/_deps/boost_1_74_0)
-    set(BOOST_LIBRARYDIR ${IFCOPENSHELL_ROOT}/_deps/boost_1_74_0/stage/vs${MSVC_YEAR}-${WIN_ARCH}/lib)
+    # set(BOOST_ROOT       ${IFCOPENSHELL_ROOT}/_deps/boost_1_74_0)
+    # set(BOOST_LIBRARYDIR ${IFCOPENSHELL_ROOT}/_deps/boost_1_74_0/stage/vs${MSVC_YEAR}-${WIN_ARCH}/lib)
 	
     set(IFC_INCLUDE_DIR  ${IFCOPENSHELL_ROOT}/src)
     set(IFC_LIBRARY_DIR  ${IFCOPENSHELL_ROOT}/_build-vs${MSVC_YEAR}-${WIN_ARCH}/${CMAKE_BUILD_TYPE})
@@ -370,8 +375,27 @@ endif()
 add_executable(voxec voxec_main.cpp progress.h)
 target_link_libraries(voxec libvoxec)
 
-install(TARGETS libvoxel voxec libvoxec
+## Copy from CMakeLists.txt of IfcOpenShell
+if(NOT SCHEMA_VERSIONS)
+    if(WASM_BUILD)
+        # super arbitrarily try to keep size down at least a little bit
+        set(SCHEMA_VERSIONS "2x3" "4")
+    else()
+        set(SCHEMA_VERSIONS "2x3" "4" "4x1" "4x2" "4x3_rc1" "4x3_rc2" "4x3_rc3" "4x3_rc4" "4x3" "4x3_tc1" "4x3_add1")
+    endif()
+endif()
+
+foreach(s ${SCHEMA_VERSIONS})
+	add_definitions(-DHAS_SCHEMA_${s})
+endforeach()
+
+string(REPLACE ";" ")(" schema_version_seq "(${SCHEMA_VERSIONS})")
+ADD_DEFINITIONS(-DSCHEMA_SEQ=${schema_version_seq})
+## End copy from CMakeLists.txt of IfcOpenShell
+
+
+install(TARGETS libvoxel
     RUNTIME DESTINATION ${CMAKE_INSTALL_PREFIX}/bin
     LIBRARY DESTINATION ${CMAKE_INSTALL_PREFIX}/lib
     ARCHIVE DESTINATION ${CMAKE_INSTALL_PREFIX}/lib)
-install(FILES ${LIBVOXELIZER_HEADER_FILES} DESTINATION ${CMAKE_INSTALL_PREFIX}/include/voxel)
+install(FILES ${LIBVOXELIZER_HEADER_FILES} DESTINATION ${CMAKE_INSTALL_PREFIX}/voxel)

@@ -48,7 +48,7 @@ public:
 				xyzs.push_back(xyz);
 			}
 
-			const Poly_Array1OfTriangle& triangles = tri->Triangles();
+			const Poly_Array1OfTriangle& triangles = tri->InternalTriangles();
 			for (int i = 1; i <= triangles.Length(); ++i) {
 
 				double boxcenter[3];
