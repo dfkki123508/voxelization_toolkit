@@ -5,6 +5,8 @@
 #include "progress.h"
 #include "json_logger.h"
 
+#include <random>
+
 voxel_operation_map::map_t& voxel_operation_map::map() {
 	static voxel_operation_map::map_t m;
 	static bool initialized = false;
@@ -61,6 +63,13 @@ voxel_operation_map::map_t& voxel_operation_map::map() {
 		m.insert(std::make_pair(std::string("local_sweep"), &instantiate<op_local_sweep<0>>));
 		m.insert(std::make_pair(std::string("local_move"), &instantiate<op_local_sweep<1>>));
 		m.insert(std::make_pair(std::string("repeat_slice"), &instantiate<op_repeat_slice>));
+		m.insert(std::make_pair(std::string("component_foreach"), &instantiate<op_component_foreach>));
+		m.insert(std::make_pair(std::string("normal_estimate"), &instantiate<op_normal_estimate>));
+		m.insert(std::make_pair(std::string("segment"), &instantiate<op_segment>));
+		m.insert(std::make_pair(std::string("keep_neighbours"), &instantiate<op_keep_neighbours>));
+		m.insert(std::make_pair(std::string("free"), &instantiate<op_free>));
+		m.insert(std::make_pair(std::string("assert"), &instantiate<op_assert>));
+
 		initialized = true;
 	}
 	return m;
@@ -232,7 +241,7 @@ void map_arguments(const std::vector<std::string> parameters, scope_map& context
 	}
 }
 
-void execute_statements(scope_map& context, const std::map<std::string, function_def_type>& functions, const std::vector<statement_type>& statements, bool silent, std::unique_ptr<application_progress>& ap, std::function<void(float)> apfn, std::string prefix="") {
+void execute_statements(scope_map& context, const std::map<std::string, function_def_type>& functions, const std::vector<statement_type>& statements, bool silent, std::unique_ptr<application_progress>& ap, std::function<void(float)> apfn, std::string prefix="", bool no_vox=false, bool with_pointcloud=false) {
 	size_t n = 0;
 
 	long HAS_VOXELS = boost::mpl::distance<
@@ -253,6 +262,9 @@ void execute_statements(scope_map& context, const std::map<std::string, function
 		auto fnit = functions.find(st.call().name());
 		if (fnit != functions.end()) {
 			auto context_copy = context;
+			// @todo needs to be set or does (inherited?) assignment op take care of this?
+			context_copy.functions = context.functions;
+
 			map_arguments(
 				fnit->second.args(),
 				context_copy,
@@ -266,7 +278,9 @@ void execute_statements(scope_map& context, const std::map<std::string, function
 				silent,
 				ap_unused,
 				[](float) {},
-				boost::lexical_cast<std::string>(n) + "."
+				boost::lexical_cast<std::string>(n) + ".",
+				no_vox,
+				with_pointcloud
 			);
 			if (context_copy.find(fnit->second.result_identifier()) == context_copy.end()) {
 				throw scope_map::not_in_scope("Undefined variable " + fnit->second.result_identifier());
@@ -281,9 +295,16 @@ void execute_statements(scope_map& context, const std::map<std::string, function
 
 		if (context[st.assignee()].which() == HAS_VOXELS) {
 			auto voxels = boost::get<abstract_voxel_storage*>(context[st.assignee()]);
-			voxel_writer w;
-			w.SetVoxels(voxels);
-			w.Write(prefix + boost::lexical_cast<std::string>(n) + ".vox");
+			
+			if (!no_vox) {
+				voxel_writer w;
+				w.SetVoxels(voxels);
+				w.Write(prefix + boost::lexical_cast<std::string>(n) + ".vox");
+			}
+
+			if (with_pointcloud) {
+				export_csv_or_obj(1, (regular_voxel_storage*)voxels, st.assignee() + ".obj");
+			}
 
 			/*
 			// @nb automatic meshing of last operand output no longer supported
@@ -326,7 +347,7 @@ void execute_statements(scope_map& context, const std::map<std::string, function
 	}
 }
 
-scope_map run(const std::vector<statement_or_function_def>& statements_and_functions, double size, size_t threads, size_t chunk_size, bool with_mesh, bool with_progress_on_cout) {
+scope_map run(const std::vector<statement_or_function_def>& statements_and_functions, double size, size_t threads, size_t chunk_size, bool with_mesh, bool with_progress_on_cout, bool no_vox, bool with_pointcloud) {
 	scope_map context;
 
 	std::unique_ptr<progress_bar> pb;
@@ -367,9 +388,42 @@ scope_map run(const std::vector<statement_or_function_def>& statements_and_funct
 	function_arg_value_type vsize_ = size;
 	context["VOXELSIZE"] = vsize_;
 
-	execute_statements(context, functions, statements, with_progress_on_cout, ap, apfn);
+	// @todo not very clean, but pass to context so that op_component_foreach can invoke them.
+	//       functions should probably just be stored in scope_map as first-class citizens?
+	context.functions = &functions;
+
+	execute_statements(context, functions, statements, with_progress_on_cout, ap, apfn, "", no_vox, with_pointcloud);
 
 	return context;
+}
+
+void invoke_function_by_name(scope_map& context, const std::string& function_name) {
+	auto& functions = *context.functions;
+
+	auto fnit = functions.find(function_name);
+	if (fnit == functions.end()) {
+		throw scope_map::not_in_scope("Undefined function " + function_name);
+	}
+
+	std::random_device rng;
+	std::uniform_int_distribution<short> index_dist('A', 'Z');
+	std::string exec_id;
+	exec_id.reserve(8);
+	for (int i = 0; i < 7; ++i) {
+		exec_id.push_back((std::string::value_type)index_dist(rng));
+	}
+	exec_id.push_back('.');
+
+	std::unique_ptr<application_progress> ap_unused;
+	execute_statements(
+		context,
+		functions,
+		fnit->second.statements(),
+		true, /* @todo silent */
+		ap_unused,
+		[](float) {},
+		exec_id
+	);
 }
 
 size_t padding_ = 32;

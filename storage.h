@@ -73,6 +73,92 @@ struct voxel_uint32_t : public voxel_desc_t {
 	virtual size_t get_size_in_bits() const { return size_in_bits; }
 };
 
+template <typename T>
+struct normal_and_curvature {
+	std::array<T, 4> nxyz_curv;
+
+	normal_and_curvature() {
+		nxyz_curv.fill(0);
+	}
+
+	normal_and_curvature(int i) {
+		nxyz_curv.fill(T(i));
+	}
+
+	normal_and_curvature(T a, T b, T c, T d) {
+		nxyz_curv = { a,b,c,d };
+	}
+
+	normal_and_curvature& operator=(const normal_and_curvature<T>&) = default;
+
+	normal_and_curvature& operator=(int i) {
+		nxyz_curv.fill(T(i));
+		return *this;
+	};
+
+	normal_and_curvature& operator&=(const normal_and_curvature&) {
+		throw std::runtime_error("Not supported");
+	};
+
+	normal_and_curvature operator&(const normal_and_curvature&) const {
+		throw std::runtime_error("Not supported");
+	};
+
+	normal_and_curvature& operator|=(const normal_and_curvature&) {
+		throw std::runtime_error("Not supported");
+	};
+
+	bool operator==(const normal_and_curvature& other) const {
+		return nxyz_curv == other.nxyz_curv;
+	};
+
+	bool operator!=(const normal_and_curvature& other) const {
+		return !operator==(other);
+	};
+
+	normal_and_curvature& operator~() const {
+		throw std::runtime_error("Not supported");
+	};
+
+	explicit operator bool() const {
+		return nxyz_curv[0] != T(0) || nxyz_curv[1] != T(0) || nxyz_curv[2] != T(0) || nxyz_curv[3] != T(0);
+	};
+
+	bool operator!() const {
+		return !this->operator bool();
+	};
+
+	template <typename U>
+	normal_and_curvature<U> convert() const {
+		const bool remap = std::is_integral<T>::value && !std::is_integral<U>::value;
+		return remap
+			? normal_and_curvature<U>(
+				(U) nxyz_curv[0] / (std::numeric_limits<T>::max()-1),
+				(U) nxyz_curv[1] / (std::numeric_limits<T>::max()-1),
+				(U) nxyz_curv[2] / (std::numeric_limits<T>::max()-1),
+				(U) nxyz_curv[3] / (std::numeric_limits<T>::max()-1)
+			)
+			: normal_and_curvature<U>(
+				nxyz_curv[0], nxyz_curv[1], nxyz_curv[2], nxyz_curv[3]
+			);
+	}
+
+	double curvature() const {
+		return nxyz_curv[3];
+	}
+};
+
+struct normal_and_curvature_t : public voxel_desc_t {
+	typedef const normal_and_curvature<int16_t>& value_type;
+	typedef normal_and_curvature<int16_t> value_type_non_ref;
+	typedef normal_and_curvature<int16_t> storage_type;
+	static const int min_value = 0;
+	static const int max_value = std::numeric_limits<uint32_t>::max();
+	static const size_t size_in_bits = sizeof(normal_and_curvature<int16_t>) * 8;
+
+	virtual size_t get_size_in_bits() const { return size_in_bits; }
+};
+
 enum file_part {
 	file_part_meta,
 	file_part_index,
@@ -301,6 +387,16 @@ namespace {
 			return integer_ceil_div(n, 8U / in_bits);
 		}
 	}
+
+	template <typename T>
+	size_t voxel_element_count(const T&) {
+		return 1;
+	}
+
+	template <>
+	size_t voxel_element_count(const uint8_t& v) {
+		return std::bitset<8>(v).count();
+	}
 }
 
 template <typename T>
@@ -321,7 +417,7 @@ private:
 			END_LOOP;
 		} else {
 			for (size_t i = 0; i < size(); ++i) {
-				count_ += std::bitset<8>(data_[i]).count();
+				count_ += voxel_element_count(data_[i]);
 			}
 		} 
 	}
@@ -349,21 +445,24 @@ public:
 		, count_(0) 
 	{
 		if (location != nullptr) {
-			data_ = new (location) typename T::storage_type[dimx_*dimy_*dimz_bytes_];
+			data_ = new (location) typename T::storage_type[dimx_*dimy_*((T::size_in_bits == 1) ? dimz_bytes_ : dimz_)];
 			mapped_ = true;
 
 			// @todo: store these also in the mmap
 			calculate_count_();
 			calculate_bounds_();
 		} else {
-			data_ = new typename T::storage_type[dimx_*dimy_*dimz_bytes_]{ 0 };
+			data_ = new typename T::storage_type[dimx_*dimy_*((T::size_in_bits == 1) ? dimz_bytes_ : dimz_)];
+			// Not entirely understood, but this was necessary to initialize the normal_and_curvature data to zeros
+			memset(data_, 0, size() * ((T::size_in_bits == 1) ? 1 : sizeof(typename T::storage_type)));
 			mapped_ = false;
 		}
 	}
 
 	void unmap() {
 		auto old = data_;
-		data_ = new typename T::storage_type[dimx_*dimy_*dimz_bytes_];
+		data_ = new typename T::storage_type[dimx_*dimy_*((T::size_in_bits == 1) ? dimz_bytes_ : dimz_)];
+		// Not entirely understood, but this was necessary to initialize the normal_and_curvature data to zeros
 		memcpy(data_, old, size());
 		mapped_ = false;
 	}
@@ -383,12 +482,12 @@ public:
 	}
 
 	size_t size() const {
-		return dimx_ * dimy_ * dimz_bytes_;
+		return dimx_ * dimy_ * ((T::size_in_bits == 1) ? dimz_bytes_ : dimz_);
 	}
 
 	abstract_voxel_storage* copy(void* location = nullptr) const {
 		continuous_voxel_storage* c = new continuous_voxel_storage(ox_, oy_, oz_, d_, dimx_, dimy_, dimz_, location);
-		memcpy(c->data_, data_, size());
+		memcpy(c->data_, data_, size() * ((T::size_in_bits == 1) ? 1 : sizeof(typename T::storage_type)));
 		c->bounds_ = bounds_;
 		c->count_ = count_;
 		return c;
@@ -436,7 +535,7 @@ public:
 	}
 
 	void Set(const vec_n<3, size_t>& xyz) {
-		Set(xyz, 1);
+		Set(xyz, typename T::value_type_non_ref(1));
 	}
 
 	void Set(const vec_n<3, size_t>& pos, void* ptr) {
@@ -490,7 +589,7 @@ public:
 	}
 
 	bool Get(const vec_n<3, size_t>& xyz) const {
-		return ValueAt(xyz) != 0;
+		return !!ValueAt(xyz);
 	}
 
 	void Get(const vec_n<3, size_t>& pos, void* loc) const {
@@ -518,13 +617,20 @@ public:
 
 	void boolean_union_inplace(const abstract_voxel_storage* other_) {
 		const continuous_voxel_storage<T>* other = (const continuous_voxel_storage<T>*) other_;
-		for (size_t i = 0; i < size(); ++i) {
-			if (T::size_in_bits < 8U) {
-				data_[i] |= other->data_[i];
-			} else if (other->data_[i]) {
-				data_[i] = other->data_[i];
+		if (this->value_bits() == other_->value_bits()) {
+			for (size_t i = 0; i < size(); ++i) {
+				if (T::size_in_bits < 8U) {
+					data_[i] |= other->data_[i];
+				} else if (other->data_[i]) {
+					data_[i] = other->data_[i];
+				}
 			}
+		} else if (this->value_bits() == 32 && other_->value_bits() == 1) {
+			throw std::runtime_error("Not implemented");
+		} else {
+			throw std::runtime_error("Not implemented");
 		}
+		
 		calculate_count_();
 
 		const auto& other_bounds = other_->bounds();
@@ -1752,6 +1858,8 @@ public:
 			return new chunked_voxel_storage<voxel_uint8_t>(grid_offset_, d_, chunk_size_, nc);
 		} else if (fmt->get_size_in_bits() == 32) {
 			return new chunked_voxel_storage<voxel_uint32_t>(grid_offset_, d_, chunk_size_, nc);
+		} else if (fmt->get_size_in_bits() == 64) {
+			return new chunked_voxel_storage<normal_and_curvature_t>(grid_offset_, d_, chunk_size_, nc);
 		} else {
 			throw std::runtime_error("Not implemented");
 		}
@@ -2146,6 +2254,9 @@ namespace std {
 	struct iterator_traits<set_voxel_iterator> {
 		typedef forward_iterator_tag iterator_category;
 		typedef std::ptrdiff_t difference_type;
+		typedef vec_n<3, size_t> value_type;
+		typedef vec_n<3, size_t>& reference;
+		typedef vec_n<3, size_t>* pointer;
 	};
 }
 

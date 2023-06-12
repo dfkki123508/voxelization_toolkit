@@ -1,23 +1,17 @@
 #ifndef VOXEC_H
 #define VOXEC_H
 
-#include "voxelfile.h"
-#include "processor.h"
-#include "storage.h"
-#include "offset.h"
-#include "fill_gaps.h"
-#include "traversal.h"
-#include "json_logger.h"
-
 #ifdef WITH_IFC
-#include <ifcparse/IfcFile.h>
 #ifdef IFCOPENSHELL_05
 #include <ifcgeom/IfcGeomIterator.h>
 #else
 #include <ifcgeom_schema_agnostic/IfcGeomIterator.h>
 #endif
 
+#include <ifcparse/IfcFile.h>
 #include <boost/filesystem.hpp>
+
+#include <Eigen/Dense>
 
 // #define OLD_GROUP_BY
 
@@ -36,6 +30,14 @@ namespace IfcParse {
 
 struct filtered_files_t {};
 #endif
+
+#include "voxelfile.h"
+#include "processor.h"
+#include "storage.h"
+#include "offset.h"
+#include "fill_gaps.h"
+#include "traversal.h"
+#include "json_logger.h"
 
 #include <Bnd_Box.hxx>
 #include <BRepBndLib.hxx>
@@ -58,7 +60,6 @@ struct filtered_files_t {};
 #include <boost/tokenizer.hpp>
 #include <boost/range/iterator_range.hpp>
 
-
 #ifdef WIN32
 #define DIRSEP "\\"
 #else
@@ -71,6 +72,10 @@ void set_padding(size_t);
 typedef boost::variant<boost::blank, filtered_files_t, geometry_collection_t*, abstract_voxel_storage*, function_arg_value_type> symbol_value;
 
 class voxel_operation;
+
+class assertion_error : public std::runtime_error {
+	using std::runtime_error::runtime_error;
+};
 
 class scope_map : public std::map<std::string, symbol_value> {
 protected:
@@ -87,6 +92,8 @@ protected:
 	}
 
 public:
+	const std::map<std::string, function_def_type>* functions;
+
 	class not_in_scope : public std::runtime_error {
 		using std::runtime_error::runtime_error;
 	};
@@ -172,6 +179,8 @@ public:
 	virtual ~voxel_operation() {}
 };
 
+void invoke_function_by_name(scope_map& context, const std::string& function_name);
+
 namespace {
 	json_logger::meta_data dump_info(abstract_voxel_storage* voxels) {
 		if (dynamic_cast<abstract_chunked_voxel_storage*>(voxels)) {
@@ -251,20 +260,23 @@ public:
 				}
 
 				auto projects = f->instances_by_type("IfcProject");
-				// @nb: a copy has to be made, because instances_by_type() returns a reference
-				//      from the live map of the file which is updated upon removeEntity()
-				std::vector<IfcUtil::IfcBaseClass*> projects_copy(projects->begin(), projects->end());
-				if (projects->size() > 1) {
-					for (auto it = projects_copy.begin() + 1; it != projects_copy.end(); ++it) {
-						auto inverses = f->getInverse((*it)->data().id(), nullptr, -1);
-						
-						f->removeEntity(*it);
+				
+				if (projects) {
+					// @nb: a copy has to be made, because instances_by_type() returns a reference
+					//      from the live map of the file which is updated upon removeEntity()
+					std::vector<IfcUtil::IfcBaseClass*> projects_copy(projects->begin(), projects->end());
+					if (projects->size() > 1) {
+						for (auto it = projects_copy.begin() + 1; it != projects_copy.end(); ++it) {
+							auto inverses = f->getInverse((*it)->data().id(), nullptr, -1);
 
-						for (auto& inv : *inverses) {
-							if (inv->declaration().name() == "IFCRELAGGREGATES") {
-								auto attr = new IfcWrite::IfcWriteArgument;
-								attr->set(projects_copy[0]);
-								inv->data().setArgument(4, attr);
+							f->removeEntity(*it);
+
+							for (auto& inv : *inverses) {
+								if (inv->declaration().name() == "IFCRELAGGREGATES") {
+									auto attr = new IfcWrite::IfcWriteArgument;
+									attr->set(projects_copy[0]);
+									inv->data().setArgument(4, attr);
+								}
 							}
 						}
 					}
@@ -284,6 +296,16 @@ public:
 		return ff;
 	}
 };
+
+#ifdef WITH_IFC
+#ifdef IFCOPENSHELL_07
+typedef IfcGeom::Iterator iterator_t;
+typedef aggregate_of_instance instance_list_t;
+#else
+typedef IfcGeom::Iterator<double> iterator_t;
+typedef IfcEntityList instance_list_t;
+#endif
+#endif
 
 class op_create_geometry : public voxel_operation {
 public:
@@ -337,7 +359,7 @@ public:
 #else
 		settings_surface.set(IfcGeom::IteratorSettings::SEARCH_FLOOR, true);
 #endif
-
+		
 		boost::optional<bool> include, roof_slabs;
 		std::vector<std::string> entities;
 		if (scope.has("include")) {
@@ -402,30 +424,15 @@ public:
 
 		for (auto ifc_file : ifc_files.files) {
 
-#ifdef IFCOPENSHELL_07
-		std::unique_ptr<IfcGeom::Iterator> iterator;
-#else
-		std::unique_ptr<IfcGeom::Iterator<double>> iterator;
-#endif
-
+			std::unique_ptr<iterator_t> iterator;
 
 #ifdef IFCOPENSHELL_05
-			iterator.reset(IfcGeom::Iterator<double>(settings_surface, ifc_file, filters_surface));
-
-
-#elif IFCOPENSHELL_07
-
-			if (threads) {
-				iterator.reset(new IfcGeom::Iterator(settings_surface, ifc_file, filters_surface, *threads));
-			}
-			else {
-				iterator.reset(new IfcGeom::Iterator(settings_surface, ifc_file, filters_surface));
-			}
+			iterator.reset(iterator_t(settings_surface, ifc_file, filters_surface));
 #else
 			if (threads) {
-				iterator.reset(new IfcGeom::Iterator<double>(settings_surface, ifc_file, filters_surface, *threads));
+				iterator.reset(new iterator_t(settings_surface, ifc_file, filters_surface, *threads));
 			} else {
-				iterator.reset(new IfcGeom::Iterator<double>(settings_surface, ifc_file, filters_surface));
+				iterator.reset(new iterator_t(settings_surface, ifc_file, filters_surface));
 			}
 #endif
 			
@@ -513,7 +520,7 @@ public:
 						compound.Move(elem->transformation().data());
 
 						BRepMesh_IncrementalMesh(compound, 0.001);
-						geometries->push_back(std::make_pair(elem->id(), compound));
+						geometries->push_back(std::make_pair(std::pair<void*, int>(ifc_file, elem->id()), compound));
 					}
 				}
 
@@ -592,7 +599,7 @@ namespace {
 
 			chunked_voxel_storage<voxel_uint32_t>* storage = new chunked_voxel_storage<voxel_uint32_t>(x1, y1, z1, vsize, nx, ny, nz, chunksize);
 
-			if (threads) {
+			if (threads && *threads != 1) {
 				progress_writer progress("voxelize", silent);
 				threaded_processor p(storage, *threads, progress);
 				p.process(surfaces->begin(), surfaces->end(), VOLUME_PRODUCT_ID(), output(MERGED()));
@@ -607,7 +614,7 @@ namespace {
 			}			
 
 		} else {
-			if (threads) {
+			if (threads && *threads != 1) {
 				progress_writer progress("voxelize", silent);
 				threaded_processor p(x1, y1, z1, vsize, nx, ny, nz, chunksize, *threads, progress);
 				p.process(surfaces->begin(), surfaces->end(), *method, output(MERGED()));
@@ -821,30 +828,94 @@ namespace {
 	}
 #else
 	template <typename Fn>
-	void group_by(regular_voxel_storage* groups, abstract_voxel_storage* voxels, Fn fn, bool use_bits=true) {
+	void group_by(regular_voxel_storage* groups, abstract_voxel_storage* voxels, Fn fn, std::map<uint32_t, size_t>& counts, bool use_bits=true, bool conserve_memory=true, bool only_counts=false) {
 
 		uint32_t v;
 		
+		// conserve_memory=false
 		std::map<uint32_t, abstract_voxel_storage*> map;
+		
+		// conserve_memory=true
+		uint32_t target;
+		std::set<uint32_t> vs;
+		std::set<uint32_t>::const_iterator vs_it;
+		abstract_voxel_storage* single;
+
+		{
+			auto acvs_voxels = dynamic_cast<abstract_chunked_voxel_storage*>(voxels);
+			auto acvs_groups = dynamic_cast<abstract_chunked_voxel_storage*>(groups);
+
+			if (!acvs_voxels || !acvs_groups) {
+				throw std::runtime_error("Group operations are not supported on non-chunked storage");
+			}
+
+			if (!(acvs_voxels->grid_offset() == acvs_groups->grid_offset()).all()) {
+				throw std::runtime_error("Group operations on unaligned voxel grids are not supported");
+			}
+		}
+
+		if (conserve_memory) {
+			for (auto& ijk : *(regular_voxel_storage*)voxels) {
+				groups->Get(ijk, &v);
+				vs.insert(v);
+			}
+			vs_it = vs.begin();
+		} 
+		
+	repeat:
+
+		if (conserve_memory) {
+			if (vs_it == vs.end()) {
+				return;
+			}
+
+			target = *vs_it;
+
+			if (use_bits) {
+				static bit_t fmt;
+				single = voxels->empty_copy_as(&fmt);
+			} else {
+				single = voxels->empty_copy();
+			}
+		}
 
 		// @todo use regions for multi threading
 		for (auto& ijk : *(regular_voxel_storage*)voxels) {
 			groups->Get(ijk, &v);
-			if (v == 0) {
-				continue;
-			}
-			abstract_voxel_storage* r;
-			auto it = map.find(v);
-			if (it == map.end()) {
-				if (use_bits) {
-					static bit_t fmt;
-					map.insert({ v, r = voxels->empty_copy_as(&fmt) });
-				} else {
-					map.insert({ v, r = voxels->empty_copy() });
+
+			if (conserve_memory) {
+				if (v != target) {
+					continue;
 				}
 			} else {
-				r = it->second;
+				if (v == 0) {
+					continue;
+				}
 			}
+
+			if (only_counts) {
+				counts[v] ++;
+				continue;
+			}
+
+			abstract_voxel_storage* r;
+
+			if (conserve_memory) {
+				r = single;
+			} else {
+				auto it = map.find(v);
+				if (it == map.end()) {
+					if (use_bits) {
+						static bit_t fmt;
+						map.insert({ v, r = voxels->empty_copy_as(&fmt) });
+					} else {
+						map.insert({ v, r = voxels->empty_copy() });
+					}
+				} else {
+					r = it->second;
+				}
+			}
+
 			if (use_bits) {
 				r->Set(ijk);
 			} else {
@@ -853,8 +924,18 @@ namespace {
 			}
 		}
 
+		if (conserve_memory) {
+			fn(target, single);
+			delete single;
+			vs_it++;
+			goto repeat;
+		}
+
 		for (auto& r : map) {
 			fn(r.first, r.second);
+
+			// @todo double check, untested
+			delete r.second;
 		}
 	}
 #endif
@@ -863,7 +944,7 @@ namespace {
 class op_describe_group_by : public voxel_operation {
 public:
 	const std::vector<argument_spec>& arg_names() const {
-		static std::vector<argument_spec> nm_ = { { true, "output_path", "string" }, { true, "input", "voxels" }, { true, "groups", "voxels" }, { false, "use_bits", "integer" } };
+		static std::vector<argument_spec> nm_ = { { true, "output_path", "string" }, { true, "input", "voxels" }, { true, "groups", "voxels" }, { false, "use_bits", "integer" }, { false, "conserve_memory", "integer" }, { false, "only_counts", "integer" } };
 		return nm_;
 	}
 	symbol_value invoke(const scope_map& scope) const {
@@ -880,6 +961,10 @@ public:
 		}
 
 		bool use_bits = scope.get_value_or<int>("use_bits", 1) == 1;
+		bool conserve_memory = scope.get_value_or<int>("conserve_memory", 0) == 1;
+		bool only_counts = scope.get_value_or<int>("only_counts", 0) == 1;
+
+		std::map<uint32_t, size_t> counts;
 
 		group_by(groups, voxels, [&ofs, &first](uint32_t id, abstract_voxel_storage* c) {
 			if (!first) {
@@ -888,17 +973,33 @@ public:
 			auto info = dump_info(c);
 			info["id"] = static_cast<long>(id);
 			ofs << json_logger::to_json_string(info);
-
-			delete c;
-
 			first = false;
+			// @nb `c` is deleted automatically after this function body exits
+			// @todo use unique_ptr&&
 		}
 #ifdef OLD_GROUP_BY
 		,scope.get_value_or<int>("THREADS", 1)
 #else
+		, counts
 		, use_bits
+		, conserve_memory
+		, only_counts
 #endif
 		);
+
+		if (only_counts) {
+			for (auto& p : counts) {
+				if (!first) {
+					ofs << ",";
+				}
+				json_logger::meta_data info = {
+					{"id", (long)p.first},
+					{"count", (long)p.second}
+				};
+				ofs << json_logger::to_json_string(info);
+				first = false;
+			}
+		}
 
 		ofs << "]";
 
@@ -930,7 +1031,7 @@ public:
 
 namespace {
 	template <typename Fn, typename Fn2>
-	void revoxelize_and_check_overlap(abstract_voxel_storage* voxels, const geometry_collection_t& surfaces, Fn fn, Fn2 fn2) {
+	void revoxelize_and_check_overlap(abstract_voxel_storage* voxels, const geometry_collection_t& surfaces, bool indiv_face, int factor, Fn fn, Fn2 fn2) {
 		BRep_Builder B;
 
 		TopoDS_Compound face_subset_all_elem;
@@ -942,17 +1043,33 @@ namespace {
 
 			bool any = false;
 
-			TopExp_Explorer exp(pair.second, TopAbs_FACE);
+			int face_idx = 0;
 
-			for (; exp.More(); exp.Next()) {
-				TopoDS_Compound C;
-				B.MakeCompound(C);
-				B.Add(C, exp.Current());
-				geometry_collection_t single = { { pair.first, C} };
+			std::list<TopoDS_Compound> items;
+
+			if (indiv_face) {
+				TopExp_Explorer exp(pair.second, TopAbs_FACE);
+				for (; exp.More(); exp.Next(), ++face_idx) {
+					TopoDS_Compound C;
+					B.MakeCompound(C);
+					B.Add(C, exp.Current());
+					items.emplace_back(C);
+				}
+			} else {
+				items.push_back(pair.second);
+			}
+
+			for (auto& item : items) {
+				geometry_collection_t single = { { pair.first, item} };
 
 				auto vs = voxels->empty_copy();
 				voxelize_2(vs, &single);
 				auto x = vs->boolean_intersection(voxels);
+
+				json_logger::message(
+					json_logger::LOG_DEBUG,
+					std::string("#") + std::to_string(pair.first.second) + ": " + std::to_string(x->count()) + "/" + std::to_string(vs->count())
+				);
 
 				// std::cout << "#" << pair.first << std::endl;
 				// std::cout << "vs ";
@@ -960,17 +1077,22 @@ namespace {
 				// std::cout << "x  ";
 				// dump_info(x);
 
-				if (vs->count() > 0 && x->count() * 2 >= vs->count()) {
+				if (vs->count() > 0 && x->count() * factor >= vs->count()) {
 					// @todo I thought that a valid non-null face would result in at least once voxel.
 					//       there might be differences here with the scanline algorithm and box intersect
 					//       algorithm.
-					B.Add(face_subset, exp.Current());
-					B.Add(face_subset_all_elem, exp.Current());
+					if (indiv_face) {
+						auto face = TopoDS_Iterator(item).Value();
+						B.Add(face_subset, face);
+						B.Add(face_subset_all_elem, face);
+					}
 					any = true;
 				}
 
 				delete vs;
 				delete x;
+
+				face_idx++;
 			}
 
 			if (any) {
@@ -1072,39 +1194,42 @@ class op_json_stats : public voxel_operation {
 
 class op_export_elements : public voxel_operation {
 	const std::vector<argument_spec>& arg_names() const {
-		static std::vector<argument_spec> nm_ = { { true, "input", "ifcfile" }, { true, "input_voxels", "voxels" }, { true, "input_surfaces", "surfaceset" }, { true, "output_path", "string" } };
+		static std::vector<argument_spec> nm_ = { { true, "input", "ifcfile" }, { true, "input_voxels", "voxels" }, { true, "input_surfaces", "surfaceset" }, { true, "output_path", "string" }, {false, "individual_faces", "integer"}, {false, "factor", "integer"}, {false, "face_count", "integer"} };
 		return nm_;
 	}
 	symbol_value invoke(const scope_map& scope) const {
 		const filtered_files_t& ifc_files = scope.get_value<filtered_files_t>("input");
-		if (ifc_files.files.size() != 1) {
-			throw std::runtime_error("Only single file inputs supported for this operation");
-		}
-		auto f0 = ifc_files.files[0];
-
 		abstract_voxel_storage* voxels = scope.get_value<abstract_voxel_storage*>("input_voxels");
 		geometry_collection_t* surfaces = scope.get_value<geometry_collection_t*>("input_surfaces");
 		const std::string output_path = scope.get_value<std::string>("output_path");
+		const bool individual_faces = scope.get_value_or<int>("individual_faces", 1) == 1;
+		const int factor = scope.get_value_or<int>("factor", 2);
+		const int face_count = scope.get_value_or<int>("face_count", 3);
 
 		std::ofstream json(output_path.c_str());
 		json << "[\n";
 		int n = 0;
 
-		revoxelize_and_check_overlap(voxels, *surfaces, [&f0, &json, &n](int iden, const TopoDS_Compound& face_subset) {
-			TopExp_Explorer exp(face_subset, TopAbs_FACE);
-			int num_faces = 0;
-			for (; exp.More(); exp.Next()) {
-				num_faces++;
-			}
+		revoxelize_and_check_overlap(voxels, *surfaces, individual_faces, factor, [&json, &n, &individual_faces, &face_count](std::pair<void*, int> iden, const TopoDS_Compound& face_subset) {
+			bool include = !individual_faces;
+			if (individual_faces) {
+				TopExp_Explorer exp(face_subset, TopAbs_FACE);
+				int num_faces = 0;
+				for (; exp.More(); exp.Next()) {
+					num_faces++;
+				}
 
-			// @todo arbitrary value alert
-			if (num_faces > 3) {
-				std::string guid = *((IfcUtil::IfcBaseEntity*)f0->instance_by_id(iden))->get("GlobalId");
-				if (n) {
+				// @todo arbitrary value alert
+				if (num_faces > face_count) {
+					include = true;
+				}
+			}
+			if (include) {
+				std::string guid = *((IfcUtil::IfcBaseEntity*)((IfcParse::IfcFile*)iden.first)->instance_by_id(iden.second))->get("GlobalId");
+				if (n++) {
 					json << ",\n";
 				}
-				n += 1;
-				json << "{\"id\":" << iden << ",\"guid\":\"" << guid << "\"}";
+				json << "{\"id\":" << iden.second << ",\"guid\":\"" << guid << "\"}";
 			}
 		}, [&output_path](const TopoDS_Compound& face_subset_all_elem) {
 		});
@@ -1139,7 +1264,7 @@ class op_export_ifc : public voxel_operation  {
 		geometry_collection_t* surfaces = scope.get_value<geometry_collection_t*>("input_surfaces");
 		const std::string output_path = scope.get_value<std::string>("output_path");
 
-		revoxelize_and_check_overlap(voxels, *surfaces, [&f0, &new_file](int iden, const TopoDS_Compound& face_subset) {
+		revoxelize_and_check_overlap(voxels, *surfaces, true, 2, [&f0, &new_file](std::pair<void*, int> iden, const TopoDS_Compound& face_subset) {
 			TopExp_Explorer exp(face_subset, TopAbs_FACE);
 			int num_faces = 0;
 			for (; exp.More(); exp.Next()) {
@@ -1148,7 +1273,7 @@ class op_export_ifc : public voxel_operation  {
 
 			// @todo arbitrary value alert
 			if (num_faces >= 1) {
-				auto inst = f0->instance_by_id(iden);
+				auto inst = f0->instance_by_id(iden.second);
 				new_file.addEntity(inst);
 				auto refs = f0->traverse(inst);
 				for (auto& r : *refs) {
@@ -1203,8 +1328,8 @@ public:
 		geometry_collection_t* surfaces = scope.get_value<geometry_collection_t*>("input_surfaces");
 		const std::string output_path = scope.get_value<std::string>("output_path");
 
-		revoxelize_and_check_overlap(voxels, *surfaces, [&output_path](int iden, const TopoDS_Compound& face_subset) {
-			std::string fn = output_path + DIRSEP + std::to_string(iden) + ".brep";
+		revoxelize_and_check_overlap(voxels, *surfaces, true, 2, [&output_path](std::pair<void*, int> iden, const TopoDS_Compound& face_subset) {
+			std::string fn = output_path + DIRSEP + std::to_string(iden.second) + ".brep";
 			std::ofstream fs(fn.c_str());
 			BRepTools::Write(face_subset, fs);
 		}, [&output_path](const TopoDS_Compound& face_subset_all_elem) {
@@ -1354,7 +1479,7 @@ public:
 
 		BRepMesh_IncrementalMesh(C, 0.001);
 		
-		geometry_collection_t* single = new geometry_collection_t{ { 0, C} };
+		geometry_collection_t* single = new geometry_collection_t{ { {nullptr, 0}, C} };
 		return single;
 	}
 };
@@ -1425,6 +1550,44 @@ public:
 		abstract_voxel_storage* voxels = scope.get_value<abstract_voxel_storage*>("input");
 		function_arg_value_type var = (int) voxels->count();
 		return var;
+	}
+};
+
+
+class op_free: public voxel_operation {
+public:
+	const std::vector<argument_spec>& arg_names() const {
+		static std::vector<argument_spec> nm_ = { { true, "input", "voxels" } };
+		return nm_;
+	}
+	symbol_value invoke(const scope_map& scope) const {
+		abstract_voxel_storage* voxels = scope.get_value<abstract_voxel_storage*>("input");
+		delete voxels;
+		symbol_value v;
+		return v;
+	}
+};
+
+class op_assert : public voxel_operation {
+public:
+	const std::vector<argument_spec>& arg_names() const {
+		static std::vector<argument_spec> nm_ = { { true, "input", "voxels|integer" } };
+		return nm_;
+	}
+	symbol_value invoke(const scope_map& scope) const {
+		try {
+			auto voxels = scope.get_value<abstract_voxel_storage*>("input");
+			if (voxels->count() == 0) {
+				throw assertion_error("Failed assert");
+			}
+		} catch (scope_map::value_error&) {
+			auto v = scope.get_value<int>("input");
+			if (v == 0) {
+				throw assertion_error("Failed assert");
+			}
+		}
+		symbol_value v;
+		return v;
 	}
 };
 
@@ -1617,6 +1780,19 @@ public:
 	symbol_value invoke(const scope_map& scope) const {
 		regular_voxel_storage* voxels = (regular_voxel_storage*) scope.get_value<abstract_voxel_storage*>("input");
 		regular_voxel_storage* seed = (regular_voxel_storage*) scope.get_value<abstract_voxel_storage*>("seed");
+
+		{
+			auto acvs_voxels = dynamic_cast<abstract_chunked_voxel_storage*>(voxels);
+			auto acvs_seed = dynamic_cast<abstract_chunked_voxel_storage*>(seed);
+
+			if (!acvs_voxels || !acvs_seed) {
+				throw std::runtime_error("Traversal operations are not supported on non-chunked storage");
+			}
+
+			if (!(acvs_voxels->grid_offset() == acvs_seed->grid_offset()).all()) {
+				throw std::runtime_error("Traversal operations on unaligned voxel grids are not supported");
+			}
+		}
 
 		boost::optional<double> max_depth;
 		try {
@@ -1899,7 +2075,7 @@ namespace {
 						if (rel->declaration().is("IfcRelDefinesByProperties")) {
 							IfcUtil::IfcBaseClass* pset = *((IfcUtil::IfcBaseEntity*)rel)->get("RelatingPropertyDefinition");
 							if (pset->declaration().is("IfcPropertySet")) {
-								aggregate_of_instance::ptr props = *((IfcUtil::IfcBaseEntity*)pset)->get("HasProperties");
+								instance_list_t::ptr props = *((IfcUtil::IfcBaseEntity*)pset)->get("HasProperties");
 								for (auto& prop : *props) {
 									if (prop->declaration().is("IfcPropertySingleValue")) {
 										auto name = (std::string) *((IfcUtil::IfcBaseEntity*)prop)->get("Name");
@@ -2040,12 +2216,15 @@ public:
 
 		if (groups) {
 			obj_export_helper helper(ofs);
+			std::map<uint32_t, size_t> counts;
 			group_by(groups, voxels, [&helper, &ofs](uint32_t id, abstract_voxel_storage* c) {
 				ofs << "g id-" << id << "\n";
 				((regular_voxel_storage*)c)->obj_export(helper, false, false);
 			}
 #ifdef OLD_GROUP_BY
 			, scope.get_value_or<int>("THREADS", 1)
+#else
+			, counts
 #endif
 			);
 		} else {
@@ -2101,6 +2280,55 @@ public:
 	}
 };
 
+namespace {
+	void export_csv_or_obj(int mode, regular_voxel_storage* voxels, const std::string& filename) {
+		std::ofstream ofs(filename.c_str());
+
+		bool use_value = mode == 0 && (voxels->value_bits() == 32 || voxels->value_bits() == 64);
+
+		auto sz = dynamic_cast<abstract_chunked_voxel_storage*>(voxels)->voxel_size();
+		auto szl = (long)dynamic_cast<abstract_chunked_voxel_storage*>(voxels)->chunk_size();
+		auto left = dynamic_cast<abstract_chunked_voxel_storage*>(voxels)->grid_offset();
+
+		uint32_t v;
+		normal_and_curvature<int16_t> v2;
+
+		std::string prefix = mode == 0 ? "" : "v ";
+		std::string sep = mode == 0 ? "," : " ";
+
+		for (auto ijk : *voxels) {
+			if (use_value) {
+				voxels->Get(ijk, voxels->value_bits() == 32 ? (void*)&v : (void*)&v2);
+				if (v == 0) {
+					// @todo why is this needed?
+					continue;
+				}
+			}
+
+			auto xyz = (ijk.as<long>() + left * szl).as<double>() * sz;
+
+			ofs << prefix
+				<< xyz.get<0>() << sep
+				<< xyz.get<1>() << sep
+				<< xyz.get<2>();
+
+			if (use_value) {
+				if (voxels->value_bits() == 32) {
+					ofs << sep << v;
+				} else {
+					auto v3 = v2.convert<float>();
+					ofs << sep << v3.nxyz_curv[0] << sep
+						<< v3.nxyz_curv[1] << sep
+						<< v3.nxyz_curv[2] << sep
+						<< v3.nxyz_curv[3];
+				}
+			}
+
+			ofs << "\n";
+		}
+	}
+}
+
 template <int mode=0>
 class op_export_csv : public voxel_operation {
 public:
@@ -2111,46 +2339,291 @@ public:
 	symbol_value invoke(const scope_map& scope) const {
 		auto voxels = (regular_voxel_storage*) scope.get_value<abstract_voxel_storage*>("input");
 		auto filename = scope.get_value<std::string>("filename");
-		std::ofstream ofs(filename.c_str());
-
-		bool use_value = mode == 0 && voxels->value_bits() == 32;
-
-		auto sz = dynamic_cast<abstract_chunked_voxel_storage*>(voxels)->voxel_size();
-		auto szl = (long)dynamic_cast<abstract_chunked_voxel_storage*>(voxels)->chunk_size();
-		auto left = dynamic_cast<abstract_chunked_voxel_storage*>(voxels)->grid_offset();
-
-		uint32_t v;
-
-		std::string prefix = mode == 0 ? "" : "v ";
-		std::string sep = mode == 0 ? "," : " ";
-
-		for (auto ijk : *voxels) {
-			if (use_value) {
-				voxels->Get(ijk, &v);
-				if (v == 0) {
-					// @todo why is this needed?
-					continue;
-				}
-			}
-
-			auto xyz = (ijk.as<long>() + left * szl).as<double>() * sz;
-			
-			ofs << prefix
-				<< xyz.get<0>() << sep
-				<< xyz.get<1>() << sep
-				<< xyz.get<2>();
-			
-			if (use_value) {
-				ofs << sep << v;
-			}
-
-			ofs << "\n";
-		}
+		
+		export_csv_or_obj(mode, voxels, filename);
 
 		symbol_value v_null;
 		return v_null;
 	}
 };
+
+class op_component_foreach : public voxel_operation {
+public:
+	const std::vector<argument_spec>& arg_names() const {
+		static std::vector<argument_spec> nm_ = { { true, "input", "voxels" }, { true, "function", "string"}, { true, "argument", "string"} };
+		return nm_;
+	}
+	symbol_value invoke(const scope_map& scope) const {
+		abstract_voxel_storage* voxels = scope.get_value<abstract_voxel_storage*>("input");
+		const std::string& function_name = scope.get_value<std::string>("function");
+		const std::string& argument_name = scope.get_value<std::string>("argument");
+
+		auto fn = [&scope, &function_name, &argument_name](regular_voxel_storage* c) {
+			std::cout << "Component " << c->count() << std::endl;
+			auto scope_copy = scope;
+			scope_copy.functions = scope.functions;
+			scope_copy[argument_name] = c;
+
+			invoke_function_by_name(scope_copy, function_name);
+		};
+
+		if (voxels->value_bits() == 1) {
+			// Invoke by connected component traversal
+
+			connected_components((regular_voxel_storage*)voxels, fn);
+		} else if (voxels->value_bits() == 32) {
+			// Invoke by uint32 value groups
+
+			// @todo eliminate overlap with group_by()
+
+			uint32_t v;
+			static bit_t fmt;
+
+			std::map<uint32_t, abstract_voxel_storage*> map;
+
+			for (auto& ijk : *(regular_voxel_storage*)voxels) {
+				voxels->Get(ijk, &v);
+				if (v == 0) {
+					continue;
+				}
+				abstract_voxel_storage* r;
+				auto it = map.find(v);
+				if (it == map.end()) {
+					map.insert({ v, r = voxels->empty_copy_as(&fmt) });
+				} else {
+					r = it->second;
+				}
+				r->Set(ijk);
+			}
+
+			for (auto& r : map) {
+				fn((regular_voxel_storage*)r.second);
+				delete r.second;
+			}
+		}
+
+		symbol_value v;
+		return v;
+	}
+};
+
+class op_normal_estimate : public voxel_operation {
+public:
+	const std::vector<argument_spec>& arg_names() const {
+		static std::vector<argument_spec> nm_ = { { true, "input", "voxels" }, { true, "max_depth", "integer"} };
+		return nm_;
+	}
+	symbol_value invoke(const scope_map& scope) const {
+		static normal_and_curvature_t fmt;
+		normal_and_curvature<int16_t> v;
+
+		auto voxels = (regular_voxel_storage*)scope.get_value<abstract_voxel_storage*>("input");
+		auto result = voxels->empty_copy_as(&fmt);
+
+		const int max_depth = scope.get_value<int>("max_depth");
+		auto box_dim = 1 + max_depth * 2;
+
+		std::vector<float> coords;
+		coords.reserve(box_dim * box_dim * box_dim);
+
+		for (auto it = voxels->begin(); it != voxels->end(); ++it) {
+			visitor<26> vis;
+			vis.max_depth = max_depth;
+
+			coords.clear();
+			
+			vis([&coords](const tagged_index& pos) {
+				if (pos.which == tagged_index::VOXEL) {
+					coords.push_back(pos.pos.get(0));
+					coords.push_back(pos.pos.get(1));
+					coords.push_back(pos.pos.get(2));
+				} else {
+					throw std::runtime_error("Unexpected");
+				}
+			}, voxels, *it);
+
+			Eigen::MatrixXf points = Eigen::Map<Eigen::MatrixXf>(coords.data(), 3, coords.size() / 3).transpose();
+
+			Eigen::MatrixXf centered = points.rowwise() - points.colwise().mean();
+			Eigen::MatrixXf cov = centered.adjoint() * centered;
+			Eigen::SelfAdjointEigenSolver<Eigen::MatrixXf> eig(cov);
+
+			auto vec = eig.eigenvectors().col(0);
+			auto norm = vec.normalized();
+			auto curv = eig.eigenvalues().col(0).value() / eig.eigenvalues().sum();
+
+			v.nxyz_curv = {
+				(int16_t) (norm.x() * (float) (std::numeric_limits<int16_t>::max()-1)),
+				(int16_t) (norm.y() * (float) (std::numeric_limits<int16_t>::max()-1)),
+				(int16_t) (norm.z() * (float) (std::numeric_limits<int16_t>::max()-1)),
+				(int16_t) (curv * (float) (std::numeric_limits<int16_t>::max()-1))
+			};
+
+			result->Set(*it, &v);
+		}
+
+		return result;
+	}
+};
+
+namespace {
+	class check_curvature_and_normal_deviation {
+	private:
+		regular_voxel_storage* voxels_;
+		normal_and_curvature<float> seed_data_float_;
+		double angular_tolerance_, max_curvature_;
+
+	public:
+		check_curvature_and_normal_deviation(regular_voxel_storage* voxels, const vec_n<3, size_t>& seed, double angular_tolerance, double max_curvature)
+			: voxels_(voxels)
+			, angular_tolerance_(angular_tolerance)
+			, max_curvature_(max_curvature)
+		{
+			normal_and_curvature<int16_t> seed_data;
+			voxels->Get(seed, &seed_data);
+			seed_data_float_ = seed_data.convert<float>();
+		}
+
+		inline bool operator()(const vec_n<3, size_t>& pos) {
+			normal_and_curvature<int16_t> data;
+			voxels_->Get(pos, &data);
+			auto data_float = data.convert<float>();
+
+			if (data_float.curvature() > max_curvature_) {
+				return false;
+			}
+			
+			Eigen::Map<Eigen::Vector3f> v0(seed_data_float_.nxyz_curv.data());
+			Eigen::Map<Eigen::Vector3f> v1(data_float.nxyz_curv.data());
+
+			double angle = std::acos(std::abs(v0.dot(v1)));
+
+			if (angle > angular_tolerance_) {
+				return false;
+			}
+
+			return true;
+		}
+	};
+}
+
+class op_segment : public voxel_operation {
+public:
+	const std::vector<argument_spec>& arg_names() const {
+		static std::vector<argument_spec> nm_ = { { true, "input", "voxels" }, { false, "angular_tolerance", "real" }, { false, "max_curvature", "real" } };
+		return nm_;
+	}
+	symbol_value invoke(const scope_map& scope) const {
+		static bit_t bits;
+		static voxel_uint32_t uints;
+		
+		auto voxels = (regular_voxel_storage*)scope.get_value<abstract_voxel_storage*>("input");
+		if (voxels->value_bits() != normal_and_curvature_t::size_in_bits) {
+			throw std::runtime_error("Expected normal and curvature voxel type");
+		}
+
+		const double angular_tolerance = scope.get_value_or<double>("angular_tolerance", 0.1);
+		const double max_curvature = scope.get_value_or<double>("max_curvature", 0.01);
+		
+		auto result = (regular_voxel_storage*)voxels->empty_copy_as(&uints);
+
+		auto voxels_bit = (regular_voxel_storage*) voxels->copy_as(&bits);
+
+		uint32_t component_index = 0;
+
+		while (voxels_bit->count()) {
+			++component_index;
+
+			auto seed = std::min_element(voxels_bit->begin(), voxels_bit->end(), [&voxels](const vec_n<3, size_t>& a, const vec_n<3, size_t>& b) {
+				normal_and_curvature<int16_t> A, B;
+				voxels->Get(a, &A);
+				voxels->Get(b, &B);
+				return A.curvature() < B.curvature();
+			});
+
+			normal_and_curvature<int16_t> A;
+			voxels->Get(*seed, &A);
+
+			if (A.convert<float>().curvature() > max_curvature) {
+				break;
+			}
+
+			check_curvature_and_normal_deviation lookup_curv(voxels, *seed, angular_tolerance, max_curvature);
+
+			visitor<26, DOF_XYZ, std::function<bool(const vec_n<3, size_t>&)>> vis;
+
+			vis.set_postcondition(std::ref(lookup_curv));
+
+			vis([&result, &component_index](const tagged_index& pos) {
+				result->Set(pos.pos, &component_index);
+			}, voxels_bit, *seed);
+
+			voxels_bit->boolean_subtraction_inplace(vis.get_visited());
+		}
+	
+		return result;
+	}
+};
+
+class op_keep_neighbours : public voxel_operation {
+public:
+	const std::vector<argument_spec>& arg_names() const {
+		static std::vector<argument_spec> nm_ = { { true, "input", "voxels" }, { true, "num_neighbours", "integer" }, { true, "connectivity", "integer" } };
+		return nm_;
+	}
+	symbol_value invoke(const scope_map& scope) const {
+		auto voxels = (regular_voxel_storage*)scope.get_value<abstract_voxel_storage*>("input");
+		auto result = (regular_voxel_storage*)voxels->empty_copy();
+		const auto num_neighbours = (size_t) scope.get_value<int>("num_neighbours");
+		const auto connectivity = scope.get_value<int>("connectivity");
+		auto extents = voxels->extents().as<long>();
+
+		for (auto it = voxels->begin(); it != voxels->end(); ++it) {
+			size_t num = 0;
+
+			if (connectivity == 6) {
+
+				for (size_t f = 0; f < 6; ++f) {
+					vec_n<3, long> n;
+					size_t normal = f / 2;
+					size_t o0 = (normal + 1) % 3;
+					size_t o1 = (normal + 2) % 3;
+					size_t side = f % 2;
+					n.get(normal) = side ? 1 : -1;
+					if (it.neighbour(n)) {
+						++num;
+					}
+				}
+
+			} else {
+
+				for (long i = -1; i <= 1; ++i) {
+					for (long j = -1; j <= 1; ++j) {
+						for (long k = -1; k <= 1; ++k) {
+							if (i == 0 && j == 0 && k == 0) {
+								continue;
+							}
+							auto ijk2 = (*it).as<long>() + make_vec<long>(i, j, k);
+							if ((ijk2 >= 0).all() && (ijk2 < extents).all()) {
+								if (voxels->Get(ijk2.as<size_t>())) {
+									++num;
+								}
+							}
+						}
+					}
+				}
+
+			}
+
+			if (num >= num_neighbours) {
+				result->Set(*it);
+			}
+		}
+
+		return result;
+	}
+};
+
 
 template <typename T>
 T* instantiate() {
@@ -2326,12 +2799,18 @@ public:
 
 		auto r = op->invoke(function_value_symbols);
 
+		if (statement_.call().name() == "free") {
+			// @todo prevent double free, can this implementation be a bit better?
+			// currently the call evaluation doesn't seem to have access to global scope
+			context.erase(boost::get<std::string>(statement_.call().args().front().value()));
+		}
+
 		delete op;
 
 		return r;
 	}
 };
 
-scope_map run(const std::vector<statement_or_function_def>& statements, double size, size_t threads = 0, size_t chunk_size = 128, bool with_mesh = false, bool with_progress_on_cout = false);
+scope_map run(const std::vector<statement_or_function_def>& statements, double size, size_t threads = 0, size_t chunk_size = 128, bool with_mesh = false, bool with_progress_on_cout = false, bool no_vox = false, bool with_point_cloud = false);
 
 #endif

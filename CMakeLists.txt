@@ -4,6 +4,7 @@ project (voxel)
 OPTION(IFC_SUPPORT "Build Volization Toolkit with IFC support (requires IfcOpenShell/master)." ON)
 OPTION(USE_STATIC_MSVC_RUNTIME "Link to the static runtime on MSVC." OFF)
 OPTION(ENABLE_TESTS "Enable tests." ON)
+OPTION(USE_BUILD_SCRIPT_OUTPUT "Use the ifcopenshell nix/build-all.py or win/build-all.cmd build script output to find dependencies." ON)
 
 include(CTest)
 
@@ -27,16 +28,16 @@ endif()
 
 message(STATUS "IFCOPENSHELL_ROOT: ${IFCOPENSHELL_ROOT}")
 
-
-if(UNIX)
-    set(IFCOPENSHELL_INSTALL ${IFCOPENSHELL_ROOT}/build/Linux/x86_64/install)
+if (USE_BUILD_SCRIPT_OUTPUT) 
+	if(UNIX)
+		set(IFCOPENSHELL_INSTALL ${IFCOPENSHELL_ROOT}/build/Linux/x86_64/install)
     
-    if(IFC_SUPPORT)
-        foreach(occt_dir occt-7.3.0 occt-7.3.0p3)
-            if(EXISTS "${IFCOPENSHELL_INSTALL}/${occt_dir}/")
-                set(OCCT_PATH "${IFCOPENSHELL_INSTALL}/${occt_dir}/")
-            endif()
-        endforeach()
+		if(IFC_SUPPORT)
+			foreach(occt_dir occt-7.3.0 occt-7.3.0p3)
+				if(EXISTS "${IFCOPENSHELL_INSTALL}/${occt_dir}/")
+					set(OCCT_PATH "${IFCOPENSHELL_INSTALL}/${occt_dir}/")
+				endif()
+			endforeach()
 
         set(OCC_LIBRARY_DIR  ${OCCT_PATH}/lib)
         set(OCC_INCLUDE_DIR  ${OCCT_PATH}/include/opencascade)
@@ -105,8 +106,8 @@ else()
 	set(Boost_USE_STATIC_LIBS   ON)
 	set(Boost_USE_MULTITHREADED ON)
 
-	if(USE_STATIC_MSVC_RUNTIME)
-		set(Boost_USE_STATIC_RUNTIME ON)
+		if(USE_STATIC_MSVC_RUNTIME)
+			set(Boost_USE_STATIC_RUNTIME ON)
     
 		# Copied from IfcOpenShell to match compilation flags, todo detect whether necessary
 		FOREACH(flag CMAKE_CXX_FLAGS CMAKE_CXX_FLAGS_DEBUG CMAKE_CXX_FLAGS_RELEASE CMAKE_CXX_FLAGS_MINSIZEREL
@@ -143,19 +144,56 @@ if (${ifcopenshell_major_version} STREQUAL "0.5")
 set(IFC_LIBRARY_NAMES IfcGeom IfcParse)
 add_definitions("-DIFCOPENSHELL_05")
 else()
-set(IFC_LIBRARY_NAMES IfcGeom IfcGeom_ifc2x3 IfcGeom_ifc4 IfcGeom_ifc4x1
-                      IfcGeom_ifc4x2 IfcGeom_ifc4x3_rc1 IfcGeom_ifc4x3_rc2 IfcParse)
+	# user to supply:
+	#  * IFCOPENSHELL_ROOT or IFC_INCLUDE_DIR
+	#  * OCC_INCLUDE_DIR
+	#  * OCC_LIBRARY_DIR
+	#  * BOOST_ROOT
+	#  * IFC_LIBRARY_DIR
+	#  * (BOOST_LIBRARYDIR)
+	#  * (USE_STATIC_MSVC_RUNTIME=Off)
+	#  * (Boost_USE_STATIC_LIBS=On)
+
+	if (NOT DEFINED IFC_INCLUDE_DIR)
+		set (IFC_INCLUDE_DIR "${IFCOPENSHELL_ROOT}/src")
+	endif()
 endif()
-endif()
+
+foreach(libname ${OCC_LIBRARY_NAMES})
+	unset(lib CACHE)
+    find_library(lib NAMES "${libname}" PATHS "${OCC_LIBRARY_DIR}" NO_DEFAULT_PATH)
+        if (lib)
+                list(APPEND OCC_LIBRARIES "${lib}")
+        else()
+                message(WARNING "OCC library ${libname} not found in ${OCC_LIBRARY_DIR}")
+		message(STATUS "${OCC_LIBRARY_DIR}")
+        endif()
+endforeach()
 
 if (UNIX)
-set(IFC_LIBRARY_NAMES ${IFC_LIBRARY_NAMES} ${IFC_LIBRARY_NAMES})
+	if(NOT APPLE)
+		set(LIB_RT rt)
+	endif()
+
+	find_package(Threads)
+	find_library(dl NAMES dl)
+
+	if(NOT APPLE)
+		set(OCC_LIBRARIES -Wl,--start-group ${OCC_LIBRARIES} -Wl,--end-group)
+	endif()
+    
+	add_definitions(-Wno-deprecated-declarations)
+else()
+	add_definitions(-D_SCL_SECURE_NO_WARNINGS -D_CRT_SECURE_NO_WARNINGS -D_UNICODE)    
+	set(WS2_LIBRARIES ws2_32.lib)
 endif()
 
-if(IFC_SUPPORT)
-set(BOOST_COMPONENTS ${BOOST_COMPONENTS} filesystem)
-if(UNIX)
-    set(BOOST_ROOT       ${IFCOPENSHELL_INSTALL}/boost-1.71.0)
+set(BOOST_COMPONENTS regex program_options iostreams system filesystem)
+
+if(IFC_SUPPORT AND USE_BUILD_SCRIPT_OUTPUT)
+	set(BOOST_COMPONENTS ${BOOST_COMPONENTS} filesystem)
+	if(UNIX)
+		set(BOOST_ROOT       ${IFCOPENSHELL_INSTALL}/boost-1.71.0)
     
     set(IFC_INCLUDE_DIR  ${IFCOPENSHELL_ROOT}/src)
     set(IFC_LIBRARY_DIR  ${IFCOPENSHELL_INSTALL}/ifcopenshell/lib)
@@ -198,6 +236,60 @@ else()
 endif()
 endif()
 
+if (IFC_SUPPORT)
+	# Find IfcOpenShell version, v0.6.0 does not have the IfcSchema namespace anymore
+	file(READ "${IFC_INCLUDE_DIR}/ifcparse/IfcParse.h" header)
+	string(REGEX MATCH "#define IFCOPENSHELL_VERSION \"[0-9a-zA-Z\\.\\-]+\"" ifcopenshell_version "${header}")
+	string(REGEX MATCH "[0-9]\\.[0-9]" ifcopenshell_major_version "${ifcopenshell_version}")
+	message(STATUS "IfcOpenShell version ${ifcopenshell_major_version}")
+
+	if (${ifcopenshell_major_version} STREQUAL "0.5")
+		set(IFC_LIBRARY_NAMES IfcGeom IfcParse)
+		add_definitions("-DIFCOPENSHELL_05")
+	else()
+		file(GLOB geomlibfiles ${IFC_LIBRARY_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}IfcGeom_*)
+		foreach(file ${geomlibfiles})
+			get_filename_component(file_we ${file} NAME_WE)
+			string(REPLACE "${CMAKE_SHARED_LIBRARY_PREFIX}IfcGeom_ifc" "" schema_name ${file_we})
+			list(APPEND SCHEMA_VERSIONS ${schema_name})
+		endforeach()
+
+		if(${ifcopenshell_major_version} STREQUAL "0.7")
+			add_definitions("-DIFCOPENSHELL_07")
+
+			string(REPLACE ";" ")(" schema_version_seq "(${SCHEMA_VERSIONS})")
+			ADD_DEFINITIONS(-DSCHEMA_SEQ=${schema_version_seq})
+
+			IF(MSVC)
+				# warning due to virtual inheritance
+				ADD_DEFINITIONS(-wd4250)
+				# warning due to select definitions in the schema being redundant
+				ADD_DEFINITIONS(-wd4584)
+			endif()
+		endif()
+
+		list(APPEND IFC_LIBRARY_NAMES IfcGeom)
+		foreach(schema_name ${SCHEMA_VERSIONS})
+			list(APPEND IFC_LIBRARY_NAMES IfcGeom_ifc${schema_name})
+		endforeach()
+		list(APPEND IFC_LIBRARY_NAMES IfcParse)
+	endif()
+endif()
+
+if (UNIX)
+	set(IFC_LIBRARY_NAMES ${IFC_LIBRARY_NAMES} ${IFC_LIBRARY_NAMES})
+endif()
+
+foreach(libname ${IFC_LIBRARY_NAMES})
+	unset(lib CACHE)
+    find_library(lib NAMES "${libname}" PATHS "${IFC_LIBRARY_DIR}" NO_DEFAULT_PATH)
+	if (lib)
+		list(APPEND IFC_LIBRARIES "${lib}")
+	else()
+		message(WARNING "IfcOpenShell library ${libname} not found")
+	endif()
+endforeach()
+
 find_package(Boost REQUIRED COMPONENTS ${BOOST_COMPONENTS})
 
 message(STATUS "Boost include files found in ${Boost_INCLUDE_DIRS}")
@@ -208,13 +300,13 @@ link_directories(${Boost_LIBRARY_DIRS})
 
 include_directories(${INCLUDE_DIRECTORIES} ${OCC_INCLUDE_DIR} ${Boost_INCLUDE_DIRS} ${HDF5_INCLUDE_DIR} ${IFC_INCLUDE_DIR})
 if (NOT MSVC)
-include(CheckCXXCompilerFlag)
-CHECK_CXX_COMPILER_FLAG("-std=c++14" COMPILER_SUPPORTS_CXX11)
-if(COMPILER_SUPPORTS_CXX11)
-    add_definitions(-std=c++14)
-else()
-    message(FATAL_ERROR "requires a compiler with C++11 support")
-endif()
+	include(CheckCXXCompilerFlag)
+	CHECK_CXX_COMPILER_FLAG("-std=c++14" COMPILER_SUPPORTS_CXX11)
+	if(COMPILER_SUPPORTS_CXX11)
+	    add_definitions(-std=c++14)
+	else()
+	    message(FATAL_ERROR "requires a compiler with C++11 support")
+	endif()
 endif()
 
 if (ENABLE_TESTS)
